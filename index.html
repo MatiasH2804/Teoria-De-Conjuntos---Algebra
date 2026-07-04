@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Laboratorio de Conjuntos - Álgebra</title>
+  <meta name="theme-color" content="#ffffff" />
+  <!-- Icono de pestaña / favicon -->
+<link
+  rel="icon"
+  type="image/png"
+  sizes="640x640"
+  href="https://cdn.pixabay.com/photo/2012/04/24/23/54/venn-diagram-41219_640.png"
+/>
+
+<!-- Icono para accesos directos en celular / app -->
+<link
+  rel="apple-touch-icon"
+  sizes="180x180"
+  href="https://cdn.pixabay.com/photo/2012/04/24/23/54/venn-diagram-41219_640.png"
+/>
+
+<!-- Color de barra en móvil -->
+<meta name="theme-color" content="#ffffff" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Conjuntos" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Álgebra · Teoría de conjuntos</p>
+        <h1>Laboratorio dinámico de conjuntos</h1>
+        <p class="hero-text">
+          Escribí conjuntos con sintaxis tipo Python: <code>{1,2,3,{a,b,c}}</code>.
+          La app separa correctamente <strong>pertenencia</strong> (<code>∈</code>, elemento contra conjunto)
+          de <strong>inclusión</strong> (<code>⊆</code>, conjunto contra conjunto), calcula operaciones y arma diagramas de Venn.
+        </p>
+      </div>
+      <div class="hero-badge" aria-label="Símbolos de teoría de conjuntos">
+        <span>∈</span>
+        <span>⊆</span>
+        <span>∪</span>
+        <span>∩</span>
+        <span>△</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel input-panel">
+        <div class="panel-title-row">
+          <div>
+            <h2>1. Cargar conjuntos</h2>
+            <p>
+              Podés cargar solo A, A y B, o A, B y C. Si dejás un conjunto en blanco, la página lo ignora.
+              Si escribís <code>{}</code> o <code>∅</code>, lo toma como conjunto vacío activo.
+            </p>
+          </div>
+          <button id="btnExample" class="ghost-btn" type="button">Cargar ejemplo</button>
+        </div>
+
+        <div class="grid-inputs">
+          <label class="field">
+            <span>Conjunto A</span>
+            <textarea id="setA" spellcheck="false">{1,{1},{2,3}}</textarea>
+          </label>
+
+          <label class="field">
+            <span>Conjunto B <small>opcional</small></span>
+            <textarea id="setB" spellcheck="false">{{1},2,3}</textarea>
+          </label>
+
+          <label class="field">
+            <span>Conjunto C <small>opcional</small></span>
+            <textarea id="setC" spellcheck="false">{3,a,{a,b}}</textarea>
+          </label>
+
+          <label class="field">
+            <span>Universal U <small>opcional, pero recomendado</small></span>
+            <textarea id="setU" spellcheck="false">{1,2,3,a,{1},{2,3},{a,b}}</textarea>
+          </label>
+        </div>
+
+        <div class="quick-row">
+          <label class="field compact-field">
+            <span>Objeto o conjunto X para verificar</span>
+            <input id="queryX" spellcheck="false" value="{1}" />
+          </label>
+          <label class="field compact-field">
+            <span>Expresión opcional</span>
+            <input id="exprInput" spellcheck="false" value="A ∪ B" />
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button id="btnAnalyze" class="primary-btn" type="button">Analizar ahora</button>
+          <button id="btnClear" class="secondary-btn" type="button">Limpiar</button>
+        </div>
+
+        <details class="help-box">
+          <summary>Sintaxis aceptada</summary>
+          <div class="help-grid">
+            <div><code>{1,2,3}</code><span>conjunto simple</span></div>
+            <div><code>{1,{1},{2,3}}</code><span>conjunto con conjuntos como elementos</span></div>
+            <div><code>{a,b,c}</code><span>letras sin comillas</span></div>
+            <div><code>{"San Juan", rojo}</code><span>texto con espacios entre comillas</span></div>
+            <div><code>∅</code> o <code>{}</code><span>conjunto vacío</span></div>
+            <div><code>A ∩ (B ∪ C)</code><span>expresión con operaciones</span></div>
+            <div><code>A^c</code> o <code>A'</code><span>complemento respecto de U</span></div>
+            <div><code>P(A)</code><span>conjunto de partes</span></div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="panel-title-row">
+          <div>
+            <h2>2. Resultado inmediato</h2>
+            <p>Verificación dinámica de pertenencia, inclusión y expresión escrita.</p>
+          </div>
+          <span id="statusBadge" class="status-badge">Listo</span>
+        </div>
+
+        <div id="errors" class="errors hidden"></div>
+        <div id="warnings" class="warnings hidden"></div>
+
+        <div class="cards-row" id="parsedSets"></div>
+        <div id="queryResults" class="truth-grid"></div>
+        <div id="expressionResult" class="expression-card"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>3. Teoría aplicada a tus datos</h2>
+            <p>La teoría se recalcula con los conjuntos activos. No inventa B ni C si los dejás en blanco.</p>
+          </div>
+        </div>
+        <div id="theoryPanel" class="practice-grid"></div>
+      </section>
+
+      <section class="panel venn-panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>4. Diagrama de Venn</h2>
+            <p>El dibujo cambia según uses uno, dos o tres conjuntos. Abajo aparecen las regiones exactas.</p>
+          </div>
+          <label class="mini-select">
+            <span>Resaltar</span>
+            <select id="highlightSelect"></select>
+          </label>
+          <button id="btnExpandVenn" class="venn-expand-btn" type="button">Ampliar diagrama</button>
+        </div>
+        <div class="venn-wrap">
+          <div id="vennSvg" class="venn-svg-box"></div>
+          <div id="vennLegend" class="venn-legend"></div>
+        </div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>5. Operaciones principales</h2>
+            <p>Unión, intersección, diferencia, diferencia simétrica, complementos, De Morgan y propiedades según la cantidad de conjuntos cargados.</p>
+          </div>
+        </div>
+        <div id="operationsTable" class="table-wrap"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>6. Todas las combinaciones posibles</h2>
+            <p>Clasificación elemento por elemento según pertenezca o no a cada conjunto activo.</p>
+          </div>
+        </div>
+        <div id="membershipMatrix" class="table-wrap"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>7. Inclusiones, igualdad y disjunción</h2>
+            <p>Comparaciones automáticas entre los conjuntos cargados y el universal.</p>
+          </div>
+        </div>
+        <div id="relationsTable" class="table-wrap"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>8. Conjunto de partes</h2>
+            <p>Genera <code>P(A)</code>, <code>P(B)</code> y <code>P(C)</code> solo para los conjuntos activos. Si hay demasiados elementos, muestra una vista parcial.</p>
+          </div>
+        </div>
+        <div id="powerSets" class="power-grid"></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="panel-title-row">
+          <div>
+            <h2>9. Verdadero / falso generado</h2>
+            <p>Proposiciones automáticas para practicar la diferencia entre <code>∈</code> y <code>⊆</code>.</p>
+          </div>
+        </div>
+        <div id="practiceList" class="practice-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="vennModal" class="venn-modal" hidden>
+    <div class="venn-modal-card" role="dialog" aria-modal="true" aria-labelledby="vennModalTitle">
+      <div class="venn-modal-head">
+        <h2 id="vennModalTitle">Diagrama de Venn</h2>
+        <button id="btnCloseVennModal" class="venn-modal-close" type="button">Cerrar</button>
+      </div>
+      <div id="vennModalSvg" class="venn-modal-svg"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
