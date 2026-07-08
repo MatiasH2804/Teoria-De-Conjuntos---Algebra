@@ -82,6 +82,11 @@
             <span>Universal U <small>opcional, pero recomendado</small></span>
             <textarea id="setU" spellcheck="false">{1,2,3,a,{1},{2,3},{a,b}}</textarea>
           </label>
+
+          <label class="field compact-field">
+            <span>Ventana numérica para Z/N</span>
+            <input id="numericWindow" spellcheck="false" value="-10..10" />
+          </label>
         </div>
 
         <div class="quick-row">
@@ -148,15 +153,24 @@
             <h2>4. Diagrama de Venn</h2>
             <p>El dibujo cambia según uses uno, dos o tres conjuntos. Abajo aparecen las regiones exactas.</p>
           </div>
-          <label class="mini-select">
-            <span>Resaltar</span>
-            <select id="highlightSelect"></select>
-          </label>
+          <div class="venn-controls">
+            <label class="mini-select">
+              <span>Mostrar en diagrama</span>
+              <select id="highlightSelect"></select>
+            </label>
+            <div class="venn-query-row">
+              <input id="vennExpressionInput" spellcheck="false" placeholder="Ej: A^c, A ∩ B, A - B, (A ∪ B)^c" />
+              <button id="btnShowVennExpression" class="venn-expand-btn" type="button">Mostrar expresión</button>
+            </div>
+          </div>
           <button id="btnExpandVenn" class="venn-expand-btn" type="button">Ampliar diagrama</button>
         </div>
         <div class="venn-wrap">
           <div id="vennSvg" class="venn-svg-box"></div>
-          <div id="vennLegend" class="venn-legend"></div>
+          <div>
+            <div id="vennResultPanel" class="venn-result-panel"></div>
+            <div id="vennLegend" class="venn-legend"></div>
+          </div>
         </div>
       </section>
 
@@ -216,7 +230,12 @@
     <div class="venn-modal-card" role="dialog" aria-modal="true" aria-labelledby="vennModalTitle">
       <div class="venn-modal-head">
         <h2 id="vennModalTitle">Diagrama de Venn</h2>
-        <button id="btnCloseVennModal" class="venn-modal-close" type="button">Cerrar</button>
+        <div class="venn-modal-toolbar">
+          <button id="btnVennZoomIn" class="venn-zoom-btn" type="button">Zoom +</button>
+          <button id="btnVennZoomOut" class="venn-zoom-btn" type="button">Zoom -</button>
+          <button id="btnVennZoomReset" class="venn-zoom-btn" type="button">Restablecer</button>
+          <button id="btnCloseVennModal" class="venn-modal-close" type="button">Cerrar</button>
+        </div>
       </div>
       <div id="vennModalSvg" class="venn-modal-svg"></div>
     </div>

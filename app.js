@@ -65,6 +65,8 @@ const EXAMPLES = [
 
 let exampleIndex = 0;
 let lastState = null;
+let vennCustomExpression = '';
+let vennZoom = 1;
 
 class SyntaxErrorSet extends Error {
   constructor(message, index = 0) {
@@ -209,6 +211,160 @@ function symmetricDifference(a, b) { return union(difference(a, b), difference(b
 function complement(a, universal) { return difference(universal, a); }
 function disjoint(a, b) { return intersection(a, b).items.length === 0; }
 
+function parseNumericWindow(raw, errors = []) {
+  const text = String(raw || '-10..10').trim() || '-10..10';
+  let match = text.match(/^(-?\d+)\s*\.\.\s*(-?\d+)(?:\s+step\s+(-?\d+))?$/i);
+  if (!match) match = text.match(/^range\s*\(\s*(-?\d+)\s*,\s*(-?\d+)(?:\s*,\s*(-?\d+))?\s*\)$/i);
+  if (!match) {
+    errors.push('Ventana numérica inválida. Usá -10..10, -10..10 step 2 o range(-10,10,2).');
+    return parseNumericWindow('-10..10');
+  }
+  let start = Number(match[1]);
+  let end = Number(match[2]);
+  let step = Math.abs(Number(match[3] || 1)) || 1;
+  if (start > end) [start, end] = [end, start];
+  if ((end - start) / step > 1000) {
+    errors.push('La ventana numérica es demasiado grande para graficar. La limito a 1001 valores.');
+    end = start + step * 1000;
+  }
+  return { start, end, step, label: `[${start},${end}]${step !== 1 ? ` paso ${step}` : ''}` };
+}
+
+function expandDomain(domainName, numericWindow) {
+  const name = String(domainName).trim().toUpperCase();
+  if (name === 'R') {
+    throw new Error('R es infinito no discreto; para graficar usá un rango discreto o un conjunto por extensión.');
+  }
+  const items = [];
+  for (let x = numericWindow.start; x <= numericWindow.end; x += numericWindow.step) {
+    if (name === 'N' && x < 1) continue;
+    if (Number.isInteger(x)) items.push(makeAtom(x));
+  }
+  return makeSet(items);
+}
+
+function parseRangeSet(raw, numericWindow) {
+  const text = String(raw).trim();
+  const parsed = parseNumericWindow(text, []);
+  if (!parsed) return null;
+  const items = [];
+  for (let x = parsed.start; x <= parsed.end; x += parsed.step) items.push(makeAtom(x));
+  return makeSet(items);
+}
+
+function isDomainToken(raw) {
+  return /^(Z|N|R)$/i.test(String(raw).trim());
+}
+
+function isRangeSyntax(raw) {
+  return /^-?\d+\s*\.\.\s*-?\d+(?:\s+step\s+-?\d+)?$/i.test(String(raw).trim())
+    || /^range\s*\(/i.test(String(raw).trim());
+}
+
+function isWrappedRangeSyntax(raw) {
+  const text = String(raw).trim();
+  return text.startsWith('{') && text.endsWith('}') && isRangeSyntax(text.slice(1, -1).trim());
+}
+
+function isSetBuilderSyntax(raw) {
+  const text = String(raw || '').trim();
+  return text.startsWith('{') && text.endsWith('}') && /[:|]/.test(text)
+    && (/[∈]/.test(text) || /\bin\b/i.test(text) || /^\{\s*[A-Za-z_]\w*\s*[:|]/.test(text));
+}
+
+function parseSetBuilderNotation(raw) {
+  const text = String(raw).trim();
+  const inner = text.slice(1, -1).trim();
+  let variable = 'x';
+  let domainRaw = null;
+  let condition = '';
+  let match = inner.match(/^([A-Za-z_]\w*)\s*(?:[∈]|\bin\b)\s*(.+?)\s*[:|]\s*(.+)$/i);
+  if (match) {
+    variable = match[1];
+    domainRaw = match[2].trim();
+    condition = match[3].trim();
+  } else {
+    match = inner.match(/^([A-Za-z_]\w*)\s*[:|]\s*(.+)$/i);
+    if (!match) throw new Error('No pude interpretar el conjunto por comprensión.');
+    variable = match[1];
+    condition = match[2].trim();
+    const domainMatch = condition.match(new RegExp(`\\b${variable}\\s+in\\s+(.+?)\\s+(?:and|y|&&|[∧])\\s+(.+)$`, 'i'));
+    if (!domainMatch) throw new Error('Indicá el dominio, por ejemplo {x in Z : x^2 >= 15}.');
+    domainRaw = domainMatch[1].trim();
+    condition = domainMatch[2].trim();
+  }
+  return { variable, domainRaw, condition };
+}
+
+function domainSetFromRaw(domainRaw, numericWindow) {
+  const domain = String(domainRaw).trim();
+  if (isDomainToken(domain)) return { set: expandDomain(domain, numericWindow), label: `${domain.toUpperCase()} evaluado en ${numericWindow.label}` };
+  if (isRangeSyntax(domain)) return { set: parseRangeSet(domain, numericWindow), label: domain };
+  if (isWrappedRangeSyntax(domain)) {
+    const inner = domain.slice(1, -1).trim();
+    return { set: parseRangeSet(inner, numericWindow), label: domain };
+  }
+  if (domain.startsWith('{')) {
+    const set = parseLooseValue(domain);
+    if (!isSet(set)) throw new Error('El dominio explícito debe ser un conjunto.');
+    return { set, label: renderValue(set) };
+  }
+  throw new Error(`Dominio no soportado: ${domain}. Usá Z, N, un rango o un conjunto por extensión.`);
+}
+
+function normalizeMathCondition(condition, variable = 'x') {
+  let expr = String(condition)
+    .replace(/²/g, '**2').replace(/³/g, '**3')
+    .replace(/\bmayor\s+o\s+igual\s+a\b/gi, '>=')
+    .replace(/\bmenor\s+o\s+igual\s+a\b/gi, '<=')
+    .replace(/\bmayor\s+que\b/gi, '>')
+    .replace(/\bmenor\s+que\b/gi, '<')
+    .replace(/\bigual\s+a\b/gi, '==')
+    .replaceAll('≥', '>=')
+    .replaceAll('≤', '<=')
+    .replaceAll('∧', '&&')
+    .replaceAll('∨', '||')
+    .replace(/\bAND\b/gi, '&&').replace(/\bOR\b/gi, '||')
+    .replace(/\band\b/gi, '&&').replace(/\bor\b/gi, '||')
+    .replace(/\by\b/gi, '&&').replace(/\bo\b/gi, '||')
+    .replace(/\bnot\b/gi, '!')
+    .replace(/\^/g, '**');
+  expr = expr.replace(/(^|[^<>=!])=([^=])/g, '$1==$2');
+  const identifiers = expr.match(/[A-Za-z_]\w*/g) || [];
+  const allowed = new Set([variable, 'abs', 'sqrt', 'floor', 'ceil', 'round', 'pow', 'true', 'false']);
+  for (const id of identifiers) {
+    if (!allowed.has(id)) throw new Error(`Nombre no permitido en la condición: ${id}.`);
+  }
+  if (!/^[\d\sA-Za-z_+\-*/%().,<>=!&|*]+$/.test(expr)) {
+    throw new Error('La condición tiene caracteres no permitidos.');
+  }
+  return expr;
+}
+
+function evaluateConditionForX(condition, x, variable = 'x') {
+  const expr = normalizeMathCondition(condition, variable);
+  const fn = new Function(variable, 'abs', 'sqrt', 'floor', 'ceil', 'round', 'pow', `"use strict"; return Boolean(${expr});`);
+  return fn(x, Math.abs, Math.sqrt, Math.floor, Math.ceil, Math.round, Math.pow);
+}
+
+function makeSetFromBuilder(raw, numericWindow) {
+  const parsed = parseSetBuilderNotation(raw);
+  const domain = domainSetFromRaw(parsed.domainRaw, numericWindow);
+  const items = domain.set.items.filter((item) => {
+    if (!isAtom(item) || typeof item.value !== 'number') return false;
+    return evaluateConditionForX(parsed.condition, item.value, parsed.variable);
+  });
+  return {
+    set: makeSet(items),
+    meta: {
+      kind: 'builder',
+      raw,
+      domainLabel: domain.label,
+      condition: parsed.condition
+    }
+  };
+}
+
 function powerSet(set, limit = 2048) {
   const n = set.items.length;
   const total = 2 ** n;
@@ -222,10 +378,15 @@ function powerSet(set, limit = 2048) {
   return { subsets, total, capped: capped < total };
 }
 
-function parseOptionalNamedSet(def, errors) {
+function parseOptionalNamedSet(def, errors, warnings, numericWindow) {
   const raw = $(def.id).value.trim();
   if (!raw) return null;
   try {
+    if (isSetBuilderSyntax(raw)) {
+      const built = makeSetFromBuilder(raw, numericWindow);
+      warnings.push(`${def.name} fue definido por comprensión. Se evaluó dentro de ${built.meta.domainLabel}.`);
+      return { ...def, raw, set: built.set, meta: built.meta };
+    }
     const v = parseLooseValue(raw);
     if (!isSet(v)) throw new SyntaxErrorSet(`${def.name} debe ser un conjunto: usá llaves, por ejemplo {1,2,3}.`);
     return { ...def, raw, set: v };
@@ -235,10 +396,26 @@ function parseOptionalNamedSet(def, errors) {
   }
 }
 
-function parseUniversal(errors) {
+function parseUniversal(errors, warnings, numericWindow) {
   const raw = $('setU').value.trim();
   if (!raw) return null;
   try {
+    if (isDomainToken(raw)) {
+      const domain = raw.toUpperCase();
+      const set = expandDomain(domain, numericWindow);
+      const label = `${domain} evaluado en ${numericWindow.label}`;
+      warnings.push(`U = ${domain} es infinito. Para graficar y listar se usa la ventana de evaluación ${numericWindow.label}.`);
+      return { id: 'setU', name: 'U', raw, set, meta: { kind: 'domain', domain, label } };
+    }
+    if (isRangeSyntax(raw)) {
+      const set = parseRangeSet(raw, numericWindow);
+      return { id: 'setU', name: 'U', raw, set, meta: { kind: 'range', label: raw } };
+    }
+    if (isWrappedRangeSyntax(raw)) {
+      const inner = raw.slice(1, -1).trim();
+      const set = parseRangeSet(inner, numericWindow);
+      return { id: 'setU', name: 'U', raw, set, meta: { kind: 'range', label: raw } };
+    }
     const v = parseLooseValue(raw);
     if (!isSet(v)) throw new SyntaxErrorSet('U debe ser un conjunto: usá llaves, por ejemplo {1,2,3}.');
     return { id: 'setU', name: 'U', raw, set: v };
@@ -251,11 +428,12 @@ function parseUniversal(errors) {
 function analyze() {
   const errors = [];
   const warnings = [];
+  const numericWindow = parseNumericWindow($('numericWindow')?.value, errors);
   const activeSets = BASE_SET_DEFS
-    .map((def) => parseOptionalNamedSet(def, errors))
+    .map((def) => parseOptionalNamedSet(def, errors, warnings, numericWindow))
     .filter(Boolean);
 
-  const providedU = parseUniversal(errors);
+  const providedU = parseUniversal(errors, warnings, numericWindow);
   const autoU = unionMany(activeSets.map((s) => s.set));
   const U = providedU?.set || autoU;
   const universalWasAutomatic = !providedU;
@@ -286,7 +464,8 @@ function analyze() {
     catch (err) { xError = err.message; errors.push(`X: ${err.message}`); }
   }
 
-  lastState = { activeSets, U, providedU, universalWasAutomatic, X, named, warnings, errors };
+  const universalLabel = providedU?.meta?.label || (providedU ? renderValue(U) : `automático: ${renderValue(U)}`);
+  lastState = { activeSets, U, providedU, universalWasAutomatic, X, named, warnings, errors, numericWindow, universalLabel };
 
   renderMessages(errors, warnings);
   renderParsedSets();
@@ -405,8 +584,8 @@ function renderExpression() {
 }
 
 class ExpressionParser {
-  constructor(text, named, universal) {
-    this.tokens = tokenizeExpression(text);
+  constructor(text, named, universal, context = lastState) {
+    this.tokens = tokenizeExpression(text, context);
     this.i = 0;
     this.named = named;
     this.universal = universal;
@@ -506,7 +685,7 @@ function assertSets(left, right, op) {
   if (!isSet(left) || !isSet(right)) throw new Error(`La operación ${op} necesita conjuntos a ambos lados.`);
 }
 
-function tokenizeExpression(text) {
+function tokenizeExpression(text, context = lastState) {
   const tokens = [];
   let i = 0;
   const source = String(text);
@@ -533,7 +712,10 @@ function tokenizeExpression(text) {
     if (ch === '{') {
       const end = findBalancedSet(source, i);
       const raw = source.slice(i, end + 1);
-      tokens.push({ type: 'literal', raw, value: parseLooseValue(raw) });
+      const value = isSetBuilderSyntax(raw)
+        ? makeSetFromBuilder(raw, context?.numericWindow || parseNumericWindow('-10..10')).set
+        : parseLooseValue(raw);
+      tokens.push({ type: 'literal', raw, value });
       i = end + 1;
       continue;
     }
@@ -631,7 +813,7 @@ function theoryCard(title, body, kind = 'neutral') {
   return `<article class="practice-card ${cls}"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(body)}</p></article>`;
 }
 
-function renderHighlightOptions() {
+function legacyRenderHighlightOptions() {
   const { activeSets } = lastState;
   const select = $('highlightSelect');
   const old = select.value || 'none';
@@ -688,6 +870,50 @@ function selectedSignatures(mode, activeSets) {
   return new Set();
 }
 
+function renderHighlightOptions() {
+  const { activeSets } = lastState;
+  const select = $('highlightSelect');
+  const old = select.value || '';
+  const options = buildVennQueryOptions(activeSets);
+  select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
+  select.value = options.some((o) => o[0] === old) ? old : (options[0]?.[0] || '');
+}
+
+function buildVennQueryOptions(activeSets) {
+  if (!activeSets.length) return [['', 'Sin conjuntos']];
+  const names = activeSets.map((s) => s.name);
+  const options = [];
+  for (const name of names) {
+    options.push([name, name]);
+    options.push([`${name}^c`, `${name}^c`]);
+  }
+  const pairs = activeSets.length === 3 ? [[0, 1], [0, 2], [1, 2]] : activeSets.length === 2 ? [[0, 1]] : [];
+  for (const [i, j] of pairs) {
+    const a = names[i], b = names[j];
+    options.push([`${a} ∪ ${b}`, `${a} ∪ ${b}`]);
+    options.push([`${a} ∩ ${b}`, `${a} ∩ ${b}`]);
+    options.push([`${a} - ${b}`, `${a} - ${b}`]);
+    options.push([`${b} - ${a}`, `${b} - ${a}`]);
+    options.push([`${a} △ ${b}`, `${a} △ ${b}`]);
+  }
+  if (activeSets.length >= 2) {
+    const unionExpr = names.join(' ∪ ');
+    const interExpr = names.join(' ∩ ');
+    options.push([unionExpr, unionExpr]);
+    options.push([interExpr, interExpr]);
+    options.push([`(${unionExpr})^c`, `(${unionExpr})^c`]);
+    options.push([`(${interExpr})^c`, `(${interExpr})^c`]);
+  }
+  options.push(['U', 'U']);
+  options.push(['∅', '∅']);
+  const unique = [];
+  const seen = new Set();
+  for (const option of options) {
+    if (!seen.has(option[0])) { seen.add(option[0]); unique.push(option); }
+  }
+  return unique;
+}
+
 function allSignatures(n) {
   const total = 2 ** n;
   const out = [];
@@ -711,7 +937,7 @@ function getRegions(activeSets, U) {
   return Object.fromEntries(Array.from(bins.entries()).map(([k, items]) => [k, makeSet(items)]));
 }
 
-function renderVenn() {
+function legacyRenderVenn() {
   const { activeSets, U } = lastState;
   const mode = $('highlightSelect').value || 'none';
   const highlighted = selectedSignatures(mode, activeSets);
@@ -736,11 +962,203 @@ function renderVenn() {
   syncVennModal();
 }
 
-function buildVennSvg(activeSets, highlighted, regions = {}) {
+function legacyBuildVennSvg(activeSets, highlighted, regions = {}) {
   const count = activeSets.length;
   const label = $('highlightSelect').selectedOptions[0]?.textContent || '';
   const regionHighlights = renderSvgRegionHighlights(count, highlighted);
   const regionItems = renderSvgRegionItems(regions, highlighted, count);
+  if (count === 1) {
+    const a = activeSets[0].name;
+    return `<svg viewBox="0 0 720 430" role="img" aria-label="Diagrama de Venn de un conjunto">
+      <rect x="28" y="28" width="664" height="374" rx="16" fill="#ffffff" stroke="#e8eaed" stroke-width="1.5"/>
+      <circle cx="360" cy="215" r="130" fill="${COLORS[0]}" opacity="${highlighted.size ? (highlighted.has('1') ? 0.42 : 0.12) : 0.32}" stroke="#1a73e8" stroke-width="3" class="venn-circle"/>
+      ${regionHighlights}
+      <text x="360" y="176" text-anchor="middle" class="venn-label">${escapeSvg(a)}</text>
+      ${regionItems}
+      <text x="360" y="372" text-anchor="middle" class="venn-subtext">${escapeSvg(label)}</text>
+      <text x="52" y="62" class="venn-subtext">U</text>
+    </svg>`;
+  }
+  if (count === 2) {
+    const [a, b] = activeSets.map((s) => s.name);
+    return `<svg viewBox="0 0 720 430" role="img" aria-label="Diagrama de Venn de dos conjuntos">
+      <rect x="28" y="28" width="664" height="374" rx="16" fill="#ffffff" stroke="#e8eaed" stroke-width="1.5"/>
+      <circle cx="300" cy="215" r="135" fill="${COLORS[0]}" opacity="0.34" stroke="#1a73e8" stroke-width="3" class="venn-circle"/>
+      <circle cx="420" cy="215" r="135" fill="${COLORS[1]}" opacity="0.32" stroke="#c5221f" stroke-width="3" class="venn-circle"/>
+      ${regionHighlights}
+      <text x="238" y="166" text-anchor="middle" class="venn-label">${escapeSvg(a)}</text>
+      <text x="482" y="166" text-anchor="middle" class="venn-label">${escapeSvg(b)}</text>
+      ${regionItems}
+      <text x="360" y="372" text-anchor="middle" class="venn-subtext">${escapeSvg(label)}</text>
+      <text x="52" y="62" class="venn-subtext">U</text>
+    </svg>`;
+  }
+  const [a, b, c] = activeSets.map((s) => s.name);
+  return `<svg viewBox="0 0 720 430" role="img" aria-label="Diagrama de Venn de tres conjuntos">
+    <rect x="28" y="28" width="664" height="374" rx="16" fill="#ffffff" stroke="#e8eaed" stroke-width="1.5"/>
+    <circle cx="295" cy="190" r="128" fill="${COLORS[0]}" opacity="0.32" stroke="#1a73e8" stroke-width="3" class="venn-circle"/>
+    <circle cx="425" cy="190" r="128" fill="${COLORS[1]}" opacity="0.30" stroke="#c5221f" stroke-width="3" class="venn-circle"/>
+    <circle cx="360" cy="290" r="128" fill="${COLORS[2]}" opacity="0.34" stroke="#f29900" stroke-width="3" class="venn-circle"/>
+    ${regionHighlights}
+    <text x="240" y="126" text-anchor="middle" class="venn-label">${escapeSvg(a)}</text>
+    <text x="480" y="126" text-anchor="middle" class="venn-label">${escapeSvg(b)}</text>
+    <text x="360" y="382" text-anchor="middle" class="venn-label">${escapeSvg(c)}</text>
+    ${regionItems}
+    <text x="360" y="394" text-anchor="middle" class="venn-subtext">${escapeSvg(label)}</text>
+    <text x="52" y="62" class="venn-subtext">U</text>
+  </svg>`;
+}
+
+function getRegionAnchorPoints(count) {
+  if (count === 1) {
+    return {
+      '1': { x: 360, y: 220, maxWidth: 78, maxChars: 10, cols: 3, colGap: 82, rowGap: 25 },
+      '0': { x: 150, y: 148, maxWidth: 78, maxChars: 10, cols: 2, colGap: 82, rowGap: 25 }
+    };
+  }
+  if (count === 2) {
+    return {
+      '10': { x: 238, y: 224, maxWidth: 72, maxChars: 9, cols: 2, colGap: 74, rowGap: 24 },
+      '11': { x: 360, y: 224, maxWidth: 70, maxChars: 9, cols: 1, colGap: 72, rowGap: 24 },
+      '01': { x: 482, y: 224, maxWidth: 72, maxChars: 9, cols: 2, colGap: 74, rowGap: 24 },
+      '00': { x: 132, y: 126, maxWidth: 78, maxChars: 10, cols: 2, colGap: 82, rowGap: 24 }
+    };
+  }
+  return {
+    '100': { x: 248, y: 195, maxWidth: 68, maxChars: 8, cols: 1, colGap: 70, rowGap: 23 },
+    '010': { x: 472, y: 195, maxWidth: 68, maxChars: 8, cols: 1, colGap: 70, rowGap: 23 },
+    '001': { x: 360, y: 330, maxWidth: 68, maxChars: 8, cols: 2, colGap: 72, rowGap: 23 },
+    '110': { x: 360, y: 160, maxWidth: 68, maxChars: 8, cols: 2, colGap: 72, rowGap: 23 },
+    '101': { x: 304, y: 272, maxWidth: 66, maxChars: 8, cols: 1, colGap: 68, rowGap: 23 },
+    '011': { x: 416, y: 272, maxWidth: 66, maxChars: 8, cols: 1, colGap: 68, rowGap: 23 },
+    '111': { x: 360, y: 236, maxWidth: 66, maxChars: 8, cols: 1, colGap: 68, rowGap: 23 },
+    '000': { x: 130, y: 112, maxWidth: 78, maxChars: 10, cols: 2, colGap: 82, rowGap: 23 }
+  };
+}
+
+function renderSvgRegionHighlights(count, highlighted) {
+  if (!highlighted.size) return '';
+  const anchors = getRegionAnchorPoints(count);
+  return Array.from(highlighted).map((sig) => {
+    const anchor = anchors[sig];
+    if (!anchor) return '';
+    const cols = anchor.cols || 1;
+    const width = Math.max(anchor.maxWidth + 30, cols * (anchor.colGap || 74));
+    return `<ellipse class="venn-region-shade" cx="${anchor.x}" cy="${anchor.y}" rx="${width / 2}" ry="48"/>`;
+  }).join('');
+}
+
+function legacyRenderSvgRegionItems(regions, highlighted, count) {
+  const anchors = getRegionAnchorPoints(count);
+  return allSignatures(count).map((sig) => {
+    const anchor = anchors[sig];
+    if (!anchor) return '';
+    const items = regions[sig]?.items || [];
+    const visible = truncateRegionItems(items, count === 1 ? 9 : count === 2 ? 8 : 6, anchor.maxChars);
+    const totalRows = visible.items.length + (visible.more ? 1 : 0);
+    if (!totalRows) return '';
+    const dimmed = highlighted.size && !highlighted.has(sig);
+    const emphasized = highlighted.size && highlighted.has(sig);
+    const startY = anchor.y - ((totalRows - 1) * 24) / 2;
+    const rows = visible.items.map((label, idx) => renderSvgItemPill(label, anchor, startY + idx * 24));
+    if (visible.more) {
+      rows.push(`<text x="${anchor.x}" y="${startY + visible.items.length * 24}" text-anchor="middle" class="venn-more-text">+${visible.more} m&#225;s</text>`);
+    }
+    return `<g class="venn-item-group ${dimmed ? 'dimmed' : ''} ${emphasized ? 'emphasized' : ''}">${rows.join('')}</g>`;
+  }).join('');
+}
+
+function truncateRegionItems(items, limit, maxChars) {
+  return {
+    items: items.slice(0, limit).map((item) => truncateText(renderValue(item), maxChars)),
+    more: Math.max(0, items.length - limit)
+  };
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text);
+  return value.length > maxChars ? `${value.slice(0, Math.max(1, maxChars - 3))}...` : value;
+}
+
+function legacyRenderSvgItemPill(label, anchor, y) {
+  const width = Math.min(anchor.maxWidth, Math.max(38, label.length * 7 + 18));
+  const x = anchor.x - width / 2;
+  return `<g>
+    <rect class="venn-item-pill" x="${x}" y="${y - 10}" width="${width}" height="20" rx="10"/>
+    <text class="venn-item-text" x="${anchor.x}" y="${y}" text-anchor="middle">${escapeSvg(label)}</text>
+  </g>`;
+}
+
+function getCurrentVennExpression() {
+  return vennCustomExpression || $('highlightSelect').value || '';
+}
+
+function evaluateVennQuery(expr) {
+  const expression = String(expr || '').trim();
+  if (!expression) return { expression: '∅', result: makeSet([]), ok: true };
+  try {
+    const result = new ExpressionParser(expression, lastState.named, lastState.U, lastState).parse();
+    if (!isSet(result)) throw new Error('La expresión del diagrama debe dar como resultado un conjunto.');
+    return { expression, result, ok: true };
+  } catch (err) {
+    return { expression, result: makeSet([]), ok: false, error: err.message };
+  }
+}
+
+function selectedSignaturesForResult(result, regions) {
+  const out = new Set();
+  if (!isSet(result)) return out;
+  for (const [sig, set] of Object.entries(regions)) {
+    if (set.items.some((item) => has(result, item))) out.add(sig);
+  }
+  return out;
+}
+
+function renderVennResultPanel(resultInfo) {
+  const host = $('vennResultPanel');
+  if (!resultInfo.ok) {
+    host.innerHTML = `<h3>Resultado mostrado</h3><p class="false-text">${escapeHtml(resultInfo.error)}</p>`;
+    return;
+  }
+  host.innerHTML = `
+    <h3>Resultado mostrado</h3>
+    <p><strong>Expresión elegida:</strong> ${escapeHtml(resultInfo.expression)}</p>
+    <p><strong>Resultado:</strong></p>
+    <div class="items">${escapeHtml(renderValue(resultInfo.result))}</div>
+    <p><strong>Cardinal:</strong> ${resultInfo.result.items.length}</p>
+    <p><strong>Universal usado:</strong> ${escapeHtml(lastState.universalLabel)}</p>
+  `;
+}
+
+function renderVenn() {
+  const { activeSets, U } = lastState;
+  if (!activeSets.length) {
+    $('vennSvg').innerHTML = buildEmptyVennSvg('Cargá al menos un conjunto');
+    $('vennLegend').innerHTML = '';
+    $('vennResultPanel').innerHTML = '';
+    syncVennModal();
+    return;
+  }
+  const regions = getRegions(activeSets, U);
+  const resultInfo = evaluateVennQuery(getCurrentVennExpression());
+  const highlighted = selectedSignaturesForResult(resultInfo.result, regions);
+  $('vennSvg').innerHTML = buildVennSvg(activeSets, highlighted, regions, resultInfo);
+  renderVennResultPanel(resultInfo);
+  const signatures = allSignatures(activeSets.length);
+  $('vennLegend').innerHTML = signatures.map((sig, idx) => `
+    <article class="region-card ${highlighted.has(sig) ? 'highlighted' : ''}" style="border-left-color:${COLORS[idx % COLORS.length]}">
+      <h3>${escapeHtml(regionName(sig, activeSets))}</h3>
+      <div class="items">${escapeHtml(renderValue(regions[sig]))}</div>
+    </article>
+  `).join('');
+  syncVennModal();
+}
+
+function buildVennSvg(activeSets, highlighted, regions = {}, resultInfo = null) {
+  const count = activeSets.length;
+  const label = resultInfo?.expression || $('highlightSelect').selectedOptions[0]?.textContent || '';
+  const regionHighlights = renderSvgRegionHighlights(count, highlighted);
+  const regionItems = renderSvgRegionItems(regions, highlighted, count, resultInfo?.result || null);
   if (count === 1) {
     const a = activeSets[0].name;
     return `<svg viewBox="0 0 720 430" role="img" aria-label="Diagrama de Venn de un conjunto">
@@ -769,7 +1187,7 @@ function buildVennSvg(activeSets, highlighted, regions = {}) {
   }
   const [a, b, c] = activeSets.map((s) => s.name);
   return `<svg viewBox="0 0 720 430" role="img" aria-label="Diagrama de Venn de tres conjuntos">
-    <rect x="28" y="28" width="664" height="374" rx="16" fill="#ffffff" stroke="#dadce0" stroke-width="2"/>
+    <rect x="28" y="28" width="664" height="374" rx="16" fill="#ffffff" stroke="#e8eaed" stroke-width="1.5"/>
     <circle cx="295" cy="190" r="128" fill="${COLORS[0]}" opacity="0.32" stroke="#1a73e8" stroke-width="3" class="venn-circle"/>
     <circle cx="425" cy="190" r="128" fill="${COLORS[1]}" opacity="0.30" stroke="#c5221f" stroke-width="3" class="venn-circle"/>
     <circle cx="360" cy="290" r="128" fill="${COLORS[2]}" opacity="0.34" stroke="#f29900" stroke-width="3" class="venn-circle"/>
@@ -783,82 +1201,55 @@ function buildVennSvg(activeSets, highlighted, regions = {}) {
   </svg>`;
 }
 
-function getRegionAnchorPoints(count) {
-  if (count === 1) {
-    return {
-      '1': { x: 360, y: 220, maxWidth: 170, maxChars: 18 },
-      '0': { x: 130, y: 122, maxWidth: 150, maxChars: 16 }
-    };
-  }
-  if (count === 2) {
-    return {
-      '10': { x: 235, y: 224, maxWidth: 140, maxChars: 15 },
-      '11': { x: 360, y: 224, maxWidth: 120, maxChars: 13 },
-      '01': { x: 485, y: 224, maxWidth: 140, maxChars: 15 },
-      '00': { x: 125, y: 112, maxWidth: 150, maxChars: 16 }
-    };
-  }
-  return {
-    '100': { x: 245, y: 198, maxWidth: 120, maxChars: 13 },
-    '010': { x: 475, y: 198, maxWidth: 120, maxChars: 13 },
-    '001': { x: 360, y: 334, maxWidth: 130, maxChars: 14 },
-    '110': { x: 360, y: 160, maxWidth: 120, maxChars: 13 },
-    '101': { x: 304, y: 270, maxWidth: 112, maxChars: 12 },
-    '011': { x: 416, y: 270, maxWidth: 112, maxChars: 12 },
-    '111': { x: 360, y: 236, maxWidth: 112, maxChars: 12 },
-    '000': { x: 125, y: 104, maxWidth: 150, maxChars: 16 }
-  };
-}
-
-function renderSvgRegionHighlights(count, highlighted) {
-  if (!highlighted.size) return '';
-  const anchors = getRegionAnchorPoints(count);
-  return Array.from(highlighted).map((sig) => {
-    const anchor = anchors[sig];
-    if (!anchor) return '';
-    const width = Math.min(anchor.maxWidth + 24, 178);
-    return `<rect class="venn-region-zone" x="${anchor.x - width / 2}" y="${anchor.y - 48}" width="${width}" height="96" rx="16"/>`;
-  }).join('');
-}
-
-function renderSvgRegionItems(regions, highlighted, count) {
+function renderSvgRegionItems(regions, highlighted, count, resultSet = null) {
   const anchors = getRegionAnchorPoints(count);
   return allSignatures(count).map((sig) => {
     const anchor = anchors[sig];
     if (!anchor) return '';
     const items = regions[sig]?.items || [];
-    const visible = truncateRegionItems(items, 6, anchor.maxChars);
+    const visible = truncateRegionItems(items, count === 1 ? 9 : count === 2 ? 8 : 6, anchor.maxChars);
     const totalRows = visible.items.length + (visible.more ? 1 : 0);
     if (!totalRows) return '';
-    const dimmed = highlighted.size && !highlighted.has(sig);
-    const emphasized = highlighted.size && highlighted.has(sig);
-    const startY = anchor.y - ((totalRows - 1) * 24) / 2;
-    const rows = visible.items.map((label, idx) => renderSvgItemPill(label, anchor, startY + idx * 24));
+    const points = distributeItemsInRegion(totalRows, anchor);
+    const rows = visible.items.map((label, idx) => {
+      const item = items[idx];
+      const isHit = resultSet && has(resultSet, item);
+      const isDim = resultSet && !isHit;
+      return renderSvgItemPill(label, { ...anchor, ...points[idx] }, isHit, isDim);
+    });
     if (visible.more) {
-      rows.push(`<text x="${anchor.x}" y="${startY + visible.items.length * 24}" text-anchor="middle" class="venn-more-text">+${visible.more} m&#225;s</text>`);
+      const point = points[visible.items.length];
+      rows.push(`<text x="${point.x}" y="${point.y}" text-anchor="middle" class="venn-more-text">+${visible.more} más</text>`);
     }
-    return `<g class="venn-item-group ${dimmed ? 'dimmed' : ''} ${emphasized ? 'emphasized' : ''}">${rows.join('')}</g>`;
+    return `<g class="venn-item-group">${rows.join('')}</g>`;
   }).join('');
 }
 
-function truncateRegionItems(items, limit, maxChars) {
-  return {
-    items: items.slice(0, limit).map((item) => truncateText(renderValue(item), maxChars)),
-    more: Math.max(0, items.length - limit)
-  };
+function distributeItemsInRegion(total, anchor) {
+  const cols = Math.max(1, Math.min(anchor.cols || 1, total));
+  const rows = Math.ceil(total / cols);
+  const colGap = anchor.colGap || 74;
+  const rowGap = anchor.rowGap || 24;
+  const out = [];
+  for (let i = 0; i < total; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const countInRow = Math.min(cols, total - row * cols);
+    const rowWidth = (countInRow - 1) * colGap;
+    out.push({
+      x: anchor.x - rowWidth / 2 + col * colGap,
+      y: anchor.y - ((rows - 1) * rowGap) / 2 + row * rowGap
+    });
+  }
+  return out;
 }
 
-function truncateText(text, maxChars) {
-  const value = String(text);
-  return value.length > maxChars ? `${value.slice(0, Math.max(1, maxChars - 3))}...` : value;
-}
-
-function renderSvgItemPill(label, anchor, y) {
-  const width = Math.min(anchor.maxWidth, Math.max(38, label.length * 7 + 18));
+function renderSvgItemPill(label, anchor, highlighted = false, dimmed = false) {
+  const width = Math.min(anchor.maxWidth, Math.max(40, label.length * 7 + 18));
   const x = anchor.x - width / 2;
   return `<g>
-    <rect class="venn-item-pill" x="${x}" y="${y - 10}" width="${width}" height="20" rx="10"/>
-    <text class="venn-item-text" x="${anchor.x}" y="${y}" text-anchor="middle">${escapeSvg(label)}</text>
+    <rect class="venn-item-pill ${highlighted ? 'highlighted' : ''} ${dimmed ? 'dimmed' : ''}" x="${x}" y="${anchor.y - 10}" width="${width}" height="20" rx="10"/>
+    <text class="venn-item-text ${dimmed ? 'dimmed' : ''}" x="${anchor.x}" y="${anchor.y}" text-anchor="middle">${escapeSvg(label)}</text>
   </g>`;
 }
 
@@ -1079,8 +1470,11 @@ function loadExample() {
   $('setB').value = e.B;
   $('setC').value = e.C;
   $('setU').value = e.U;
+  $('numericWindow').value = '-10..10';
   $('queryX').value = e.X;
   $('exprInput').value = e.E;
+  $('vennExpressionInput').value = '';
+  vennCustomExpression = '';
   analyze();
 }
 
@@ -1089,8 +1483,11 @@ function clearAll() {
   $('setB').value = '';
   $('setC').value = '';
   $('setU').value = '';
+  $('numericWindow').value = '-10..10';
   $('queryX').value = '';
   $('exprInput').value = '';
+  $('vennExpressionInput').value = '';
+  vennCustomExpression = '';
   analyze();
 }
 
@@ -1111,22 +1508,47 @@ function syncVennModal() {
   const source = $('vennSvg');
   if (!modal || !modalSvg || !source || modal.hidden) return;
   modalSvg.innerHTML = source.innerHTML;
+  applyVennZoom();
+}
+
+function applyVennZoom() {
+  const svg = $('vennModalSvg')?.querySelector('svg');
+  if (!svg) return;
+  svg.style.transform = `scale(${vennZoom})`;
+  svg.style.marginRight = `${Math.max(0, vennZoom - 1) * 100}%`;
+  svg.style.marginBottom = `${Math.max(0, vennZoom - 1) * 80}%`;
+}
+
+function setVennZoom(level) {
+  vennZoom = Math.min(3, Math.max(0.6, level));
+  applyVennZoom();
 }
 
 function wire() {
   $('btnAnalyze').addEventListener('click', analyze);
   $('btnClear').addEventListener('click', clearAll);
   $('btnExample').addEventListener('click', loadExample);
-  $('highlightSelect').addEventListener('change', renderVenn);
+  $('highlightSelect').addEventListener('change', () => {
+    vennCustomExpression = '';
+    $('vennExpressionInput').value = '';
+    renderVenn();
+  });
+  $('btnShowVennExpression').addEventListener('click', () => {
+    vennCustomExpression = $('vennExpressionInput').value.trim();
+    renderVenn();
+  });
   $('btnExpandVenn').addEventListener('click', openVennModal);
   $('btnCloseVennModal').addEventListener('click', closeVennModal);
+  $('btnVennZoomIn').addEventListener('click', () => setVennZoom(vennZoom + 0.15));
+  $('btnVennZoomOut').addEventListener('click', () => setVennZoom(vennZoom - 0.15));
+  $('btnVennZoomReset').addEventListener('click', () => setVennZoom(1));
   $('vennModal').addEventListener('click', (event) => {
     if (event.target === $('vennModal')) closeVennModal();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !$('vennModal').hidden) closeVennModal();
   });
-  ['setA','setB','setC','setU','queryX','exprInput'].forEach(id => {
+  ['setA','setB','setC','setU','numericWindow','queryX','exprInput'].forEach(id => {
     $(id).addEventListener('input', debounce(analyze, 220));
   });
   analyze();
